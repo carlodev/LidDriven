@@ -5,9 +5,15 @@ using Gridap.Arrays
 using LineSearches: BackTracking, Static, MoreThuente
 using FillArrays
 using Gridap.Fields: meas
+using Statistics
+using JLD2
 
 """
 LidDrivenCavityFlow
+The domain is a square refined close to the walls
+Non slip condition on the 3 walls, constant velocity on the top wall
+The pressure is set to zero in the bottom left corner
+
 """
 
 #Parameters
@@ -27,8 +33,8 @@ end
 
 
 Re = 1000
-L = 0.5
-u0 = 1
+L = 0.5 #1/2 of the domain dimensions
+u0 = 1 #Top velocity
 
 ν = u0*2*L/Re #m2/s 
 
@@ -40,12 +46,10 @@ hf = VectorValue(0,0)
 
 #ODE settings
 t0 = 0.0
-dt = 1
-tF = 100
+dt = 0.5
+tF = 150
 
 Ntimestep = (tF-t0)/dt
-θ = 1
-
 initial_condition = false #print model of initial condition
 
 
@@ -63,8 +67,7 @@ add_tag_from_tags!(labels,"p",[4,])
 
 writevtk(model,"model")
 
-#ANALITICAL SOLUTION, used also for initial condition
-
+#Function of velocity and pressure on the boundaries
 u_wall(x, t) = VectorValue(0,0)
 u_wall(t::Real) = x -> u_wall(x, t)
 
@@ -78,26 +81,16 @@ p0(t::Real) = x -> p0(x, t)
 
 
 reffeᵤ = ReferenceFE(lagrangian, VectorValue{2,Float64}, order)
-V = TestFESpace(model, reffeᵤ, conformity=:H1, dirichlet_tags=["diri0","diri1"])
+V = TestFESpace(model, reffeᵤ, conformity=:H1, dirichlet_tags=["diri0","diri1"]) #diri0 union of the walls, diri1 top wall
 reffeₚ = ReferenceFE(lagrangian,Float64, order)
-#reffeₚ = ReferenceFE(lagrangian,Float64,order-1; space=:P)
-#reffeₚ = ReferenceFE(lagrangian, Float64, order - 1)
-#Q = TestFESpace(model,reffeₚ, conformity=:L2, constraint=:zeromean)
-#Q = TestFESpace(model,reffeₚ, conformity=:L2, dirichlet_tags="interior")
 Q = TestFESpace(model,reffeₚ, conformity=:H1, dirichlet_tags=["p"])
 
-#Since we impose Dirichlet boundary conditions on the entire boundary ∂Ω, the mean value of the pressure is constrained to zero in order have a well posed problem
-#Q = TestFESpace(model, reffeₚ)
-
-
-#Transient is just for the fact that the boundary conditions change with time
 U = TransientTrialFESpace(V, [u_wall, u_top])
-#P = TrialFESpace(Q) #?transient
-P = TransientTrialFESpace(Q, p0) #?transient
+P = TransientTrialFESpace(Q, p0) 
 
 
 
-Y = MultiFieldFESpace([V, Q]) #?transient
+Y = MultiFieldFESpace([V, Q])
 X = TransientMultiFieldFESpace([U, P])
 
 degree = 4*order
@@ -105,7 +98,7 @@ degree = 4*order
 dΩ = Measure(Ω, degree)
 
 
-h = lazy_map(h->h^(1/2),get_cell_measure(Ω))
+h = lazy_map(h->h^(1/2),get_cell_measure(Ω)) #get the area of each cell (because in 2D), then ^1/2
 
 
 
@@ -118,7 +111,7 @@ Rc(u) = ∇⋅u
 
 function τ(u,h)
    
-    β=u0
+    β=u0 
     τ₂ = h^2/(4*ν)
     val(x) = x
     val(x::Gridap.Fields.ForwardDiff.Dual) = x.value
@@ -164,35 +157,47 @@ U0 = U(0.0)
 P0 = P(0.0)
 X0 = X(0.0)
 
+#initial condition
 uh0 = interpolate_everywhere(VectorValue(0,0), U0)
 ph0 = interpolate_everywhere(0, P0)
-
 xh0 = interpolate_everywhere([uh0, ph0], X0)
 
+#initial condition - derivative; It is not ideal, the first iteration are not perfect
+vuh0 = interpolate_everywhere(VectorValue(0,0), U0)
+vph0 = interpolate_everywhere(0, P0)
+vxh0 = interpolate_everywhere([vuh0, vph0], X0)
 
-tau =τ∘(uh0, h)
+#For extracting results, for fft
+N_samples = 100
+U_vector = zeros(length(uh0.free_values), N_samples)
 
-writevtk(Ω, "Start_", cellfields=["tau" => tau, "uh0"=>uh0])
-
-
-ode_solver = ThetaMethod(nls, dt, θ)
-
-sol_t = solve(ode_solver, op, xh0, t0, tF)
+ρ∞ = 0.8 #ρ∞=1 no dissipation, ρ∞=0 max dissipation, ρ∞=0.5 quite good 
+ode_solver = GeneralizedAlpha(nls,dt,ρ∞)
+sol_t = solve(ode_solver,op,(xh0,vxh0),t0,tF)
 
 
 _t_nn = t0
 iteration = 0
+s_iteration = 1
+
 createpvd("TV_2d") do pvd
   for (xh_tn, tn) in sol_t
     global _t_nn
     _t_nn += dt
     global iteration
+    global s_iteration
+    global U_vector
     iteration += 1
     println("it_num = $iteration\n")
     uh_tn = xh_tn[1]
     ph_tn = xh_tn[2]
     ωh_tn = ∇ × uh_tn
-    if mod(iteration,1  )<1
+    if tn>100
+      U_vector[: , s_iteration] =  uh_tn.free_values
+      s_iteration += 1
+    end
+
+    if mod(iteration,1  )<1 #useful for printing not every iteration
       pvd[tn] = createvtk(Ω, "Results/TV_2d_$_t_nn" * ".vtu", cellfields=["uh" => uh_tn, "ph" => ph_tn, "wh" => ωh_tn])
     end
     
@@ -200,3 +205,4 @@ createpvd("TV_2d") do pvd
 
 end
 
+@save "LidDriven.jld2" U_vector
