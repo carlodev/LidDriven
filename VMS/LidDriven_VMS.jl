@@ -139,7 +139,7 @@ d = evaluate(inv_Jt, [Point(0.0,0.0)]) #x2
 
 d ⋅ d
 
-G = (d .⋅ d)[1,:]
+G = (d .⋅ d')[1,:]
 
 GG = G .⊙ G
 
@@ -167,25 +167,18 @@ function τm(uu,G,GG)
     τ₃ = (ν^2 *GG)
     val(x) = x
     function val(x::Gridap.Fields.ForwardDiff.Dual)
-      print("Here\n")
-
-    x.value
+        x.value
     end
     uu1 = val(uu[1])
     uu2 = val(uu[2])
     uu_new = VectorValue(uu1,uu2)
     
-    print("$uu\n")
-    print("$(typeof(uu))\n")
-    print("$uu_new\n")
-
-    #uu = val(uu)
 
     if iszero(norm(uu_new))
         return (τ₁ .+ τ₃).^(-1/2)      
     end
 
-    τ₂ = uu_new⋅G⋅uu_new'
+    τ₂ = uu_new⋅G⋅uu_new
     #print("$τ₂\n")
     return (τ₁ .+  τ₂ .+ τ₃).^(-1/2)     
 end
